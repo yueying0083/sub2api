@@ -2,9 +2,13 @@ package securityaudit
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
+	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -18,6 +22,8 @@ type PromptAdminService interface {
 	Probe(context.Context, ProbeRequest) ProbeResult
 	Runtime(context.Context) RuntimeSnapshot
 	ListEvents(context.Context, EventFilter, int, int) (*EventPage, error)
+	ListUserActivity(context.Context, UserActivityFilter, int, int) (*UserActivityPage, error)
+	ExportUserPrompts(context.Context, UserActivityFilter, int) ([]*UserPromptRecord, error)
 	GetEvent(context.Context, int64) (*Event, error)
 	DeleteEvent(context.Context, int64) (*DeleteResult, error)
 	DeleteEventsByIDs(context.Context, []int64) (*DeleteResult, error)
@@ -102,6 +108,70 @@ func (h *PromptAdminHandler) ListEvents(c *gin.Context) {
 		return
 	}
 	response.Success(c, result)
+}
+
+func (h *PromptAdminHandler) ListUserActivity(c *gin.Context) {
+	page, err := positiveIntQuery(c, "page", 1, 0)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	pageSize, err := positiveIntQuery(c, "page_size", 20, 100)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	filter, err := userActivityFilterFromQuery(c)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	result, err := h.service.ListUserActivity(c.Request.Context(), filter, page, pageSize)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+func (h *PromptAdminHandler) ExportUserPrompts(c *gin.Context) {
+	filter, err := userActivityFilterFromQuery(c)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if filter.StartAt == nil || filter.EndAt == nil || !filter.StartAt.Before(*filter.EndAt) {
+		response.ErrorFrom(c, infraerrors.BadRequest("prompt_audit_export_time_required", "导出必须指定有效的开始和结束时间"))
+		return
+	}
+	records, err := h.service.ExportUserPrompts(c.Request.Context(), filter, 100000)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	filename := fmt.Sprintf("prompt-user-records-%s-%s.csv", filter.StartAt.Format("20060102"), filter.EndAt.Format("20060102"))
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	c.Status(http.StatusOK)
+	_, _ = c.Writer.Write([]byte{0xEF, 0xBB, 0xBF})
+	writer := csv.NewWriter(c.Writer)
+	_ = writer.Write([]string{"时间", "用户ID", "用户名", "邮箱", "API Key", "分组", "模型", "用户输入", "Request ID"})
+	for _, record := range records {
+		_ = writer.Write([]string{
+			record.CreatedAt.UTC().Format(time.RFC3339), strconv.FormatInt(record.UserID, 10), safeCSVCell(record.Username),
+			safeCSVCell(record.UserEmail), safeCSVCell(record.APIKeyName), safeCSVCell(record.GroupName), safeCSVCell(record.Model),
+			safeCSVCell(record.Prompt), safeCSVCell(record.RequestID),
+		})
+	}
+	writer.Flush()
+}
+
+func safeCSVCell(value string) string {
+	value = strings.ReplaceAll(value, "\x00", "")
+	if value != "" && strings.ContainsRune("=+-@", rune(value[0])) {
+		return "'" + value
+	}
+	return value
 }
 
 func (h *PromptAdminHandler) GetEvent(c *gin.Context) {
@@ -284,6 +354,26 @@ func eventFilterFromQuery(c *gin.Context) (EventFilter, error) {
 		if filter.EndAt == nil {
 			return EventFilter{}, infraerrors.BadRequest("prompt_audit_invalid_time", "结束时间无效")
 		}
+	}
+	return filter, nil
+}
+
+func userActivityFilterFromQuery(c *gin.Context) (UserActivityFilter, error) {
+	filter := UserActivityFilter{Keyword: c.Query("keyword")}
+	if value := strings.TrimSpace(c.Query("start_at")); value != "" {
+		filter.StartAt = parseTimeQuery(value)
+		if filter.StartAt == nil {
+			return UserActivityFilter{}, infraerrors.BadRequest("prompt_audit_invalid_time", "开始时间无效")
+		}
+	}
+	if value := strings.TrimSpace(c.Query("end_at")); value != "" {
+		filter.EndAt = parseTimeQuery(value)
+		if filter.EndAt == nil {
+			return UserActivityFilter{}, infraerrors.BadRequest("prompt_audit_invalid_time", "结束时间无效")
+		}
+	}
+	if filter.StartAt != nil && filter.EndAt != nil && filter.StartAt.After(*filter.EndAt) {
+		return UserActivityFilter{}, infraerrors.BadRequest("prompt_audit_invalid_time", "开始时间不能晚于结束时间")
 	}
 	return filter, nil
 }

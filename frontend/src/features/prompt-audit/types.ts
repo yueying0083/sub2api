@@ -22,6 +22,7 @@ export interface PromptAuditEndpointDraft extends PromptAuditEndpoint {
 
 export interface PromptAuditConfig {
   enabled: boolean
+  activity_recording_enabled: boolean
   blocking_enabled: boolean
   blocking_latest_turn_only: boolean
   store_pass_events: boolean
@@ -46,6 +47,7 @@ export interface PromptAuditDraft extends Omit<PromptAuditConfig, 'endpoints'> {
 export interface PromptAuditUpdateRequest {
   expected_config_version: number
   enabled: boolean
+  activity_recording_enabled: boolean
   blocking_enabled: boolean
   blocking_latest_turn_only: boolean
   store_pass_events: boolean
@@ -217,6 +219,35 @@ export interface PromptEventPage {
   pages: number
 }
 
+export interface PromptUserActivity {
+  user_id: number
+  username: string
+  user_email: string
+  prompt_count: number
+  active_days: number
+  first_active_at: string
+  last_active_at: string
+  last_prompt_preview: string
+  models: string[]
+  groups: string[]
+}
+
+export interface PromptUserActivityFilters {
+  keyword: string
+  start_at: string
+  end_at: string
+}
+
+export interface PromptUserActivityPage {
+  items: PromptUserActivity[]
+  total_users: number
+  total_prompts: number
+  active_days: number
+  page: number
+  page_size: number
+  pages: number
+}
+
 export interface PromptDeleteResult {
   deleted_events: number
   deleted_jobs: number
@@ -243,4 +274,5 @@ export interface PromptLoadErrors {
   runtime: string
   groups: string
   events: string
+  activity: string
 }

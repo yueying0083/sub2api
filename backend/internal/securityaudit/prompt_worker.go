@@ -140,8 +140,8 @@ func (r *Runner) processJob(ctx context.Context, workerID int, cfg ActiveConfig,
 	if err != nil {
 		return r.finishFailure(ctx, job, &GuardError{Code: "payload_missing", Retryable: false, Cause: err})
 	}
-	// The job row only carries redacted metadata; the full prompt for the audit
-	// event is reconstructed here from the transient scan payload.
+	// Retain only the prioritized latest user input on the event. System
+	// instructions and conversation context remain transient scanner input.
 	job.Snapshot.FullPrompt = FullPromptFromScanText(scanText)
 	endpoints := cfg.EnabledEndpoints()
 	if len(endpoints) == 0 {
@@ -189,7 +189,7 @@ func (r *Runner) processJob(ctx context.Context, workerID int, cfg ActiveConfig,
 		"action": aggregated.Action, "chunk_total": aggregated.ChunkTotal,
 		"latency_ms": aggregated.LatencyMS, "guard_endpoint_id": aggregated.GuardEndpointID, "status": "completed",
 	}))
-	event, err := r.repo.Complete(ctx, job, aggregated, cfg.StorePassEvents)
+	event, err := r.repo.Complete(ctx, job, aggregated, cfg.StorePassEvents || cfg.ActivityRecordingEnabled)
 	if err != nil {
 		return err
 	}

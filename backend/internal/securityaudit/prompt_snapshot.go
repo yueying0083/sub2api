@@ -47,6 +47,7 @@ func extractPromptSnapshot(req Request, latestTurnOnly bool) (PromptSnapshot, er
 	}
 	extracted := extractProtocolSegments(req.Protocol, document)
 	segments := normalizeSegmentsLatestUserFirst(extracted)
+	storedUserInput := latestUserInputText(extracted)
 	if latestTurnOnly {
 		segments = blockingSegmentsLatestUserAndPreviousOutput(extracted)
 	}
@@ -54,7 +55,7 @@ func extractPromptSnapshot(req Request, latestTurnOnly bool) (PromptSnapshot, er
 		return PromptSnapshot{}, ErrNoPromptText
 	}
 	scanText, metadataText := buildPrioritizedScanText(segments)
-	digest := sha256.Sum256([]byte(metadataText))
+	digest := sha256.Sum256([]byte(storedUserInput))
 	stage := strings.TrimSpace(req.Stage)
 	if stage == "" {
 		stage = "http"
@@ -64,8 +65,8 @@ func extractPromptSnapshot(req Request, latestTurnOnly bool) (PromptSnapshot, er
 		UserEmailSnapshot: req.UserEmail, APIKeyID: req.APIKeyID, APIKeyNameSnapshot: req.APIKeyName,
 		GroupID: cloneInt64Ptr(req.GroupID), GroupName: req.GroupName, Provider: req.Provider,
 		Endpoint: req.Endpoint, Protocol: req.Protocol, Model: req.Model,
-		PromptHash: hex.EncodeToString(digest[:]), RedactedPreview: BuildPromptPreview(metadataText, DefaultPromptPreviewMaxRunes),
-		FullPrompt:   BuildFullPrompt(metadataText, DefaultFullPromptMaxRunes),
+		PromptHash: hex.EncodeToString(digest[:]), RedactedPreview: BuildPromptPreview(storedUserInput, DefaultPromptPreviewMaxRunes),
+		FullPrompt:   BuildFullPrompt(storedUserInput, DefaultFullPromptMaxRunes),
 		PromptLength: utf8.RuneCountInString(metadataText), MessageCount: len(segments), Stage: stage,
 		ScanText: scanText,
 	}, nil
@@ -457,6 +458,16 @@ func normalizeSegmentsLatestUserFirst(values []promptSegment) []string {
 	return result
 }
 
+func latestUserInputText(values []promptSegment) string {
+	normalized := normalizedPromptSegments(values)
+	for index := len(normalized) - 1; index >= 0; index-- {
+		if isUserSegment(normalized[index]) {
+			return normalized[index].text
+		}
+	}
+	return ""
+}
+
 // blockingSegmentsLatestUserAndPreviousOutput limits synchronous guard input to
 // the current user turn and the nearest preceding assistant/model turn. It is
 // deliberately opt-in because full transcript scanning remains stronger at
@@ -626,12 +637,12 @@ func BuildFullPrompt(value string, maxRunes int) string {
 	return TrimRunes(strings.TrimSpace(value), maxRunes)
 }
 
-// FullPromptFromScanText reconstructs the display prompt from the worker scan
-// payload. buildPrioritizedScanText inserts exactly one priority separator
-// between the prioritized segment and the remainder, so replacing it with the
-// metadata joiner yields the original multi-segment text.
+// FullPromptFromScanText returns only the prioritized latest user turn. The
+// remainder may contain system instructions and conversation context needed by
+// the scanner, but those values must never be retained on the audit event.
 func FullPromptFromScanText(scanText string) string {
-	return BuildFullPrompt(strings.ReplaceAll(scanText, promptAuditPrioritySeparator, "\n\n"), DefaultFullPromptMaxRunes)
+	latest, _, _ := strings.Cut(scanText, promptAuditPrioritySeparator)
+	return BuildFullPrompt(latest, DefaultFullPromptMaxRunes)
 }
 
 func TrimRunes(value string, limit int) string {

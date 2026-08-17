@@ -11,6 +11,8 @@ import type {
   PromptEventPage,
   PromptProbeResult,
   PromptAuditEndpointDraft,
+  PromptUserActivityFilters,
+  PromptUserActivityPage,
 } from './types'
 import { eventFilterPayload, eventQueryParams } from './viewModel'
 
@@ -64,6 +66,33 @@ export async function getEvent(id: number): Promise<PromptAuditEvent> {
   return data
 }
 
+export async function listUserActivity(
+  filters: PromptUserActivityFilters,
+  page: number,
+  pageSize: number,
+): Promise<PromptUserActivityPage> {
+  const params: Record<string, string | number> = { page, page_size: pageSize }
+  if (filters.keyword.trim()) params.keyword = filters.keyword.trim()
+  for (const key of ['start_at', 'end_at'] as const) {
+    if (!filters[key].trim()) continue
+    const date = new Date(filters[key])
+    if (!Number.isNaN(date.getTime())) params[key] = date.toISOString()
+  }
+  const { data } = await apiClient.get<PromptUserActivityPage>(`${basePath}/user-activity`, { params })
+  return data
+}
+
+export async function exportUserPrompts(filters: PromptUserActivityFilters): Promise<Blob> {
+  const params: Record<string, string> = {}
+  for (const key of ['start_at', 'end_at'] as const) {
+    const date = new Date(filters[key])
+    if (!Number.isNaN(date.getTime())) params[key] = date.toISOString()
+  }
+  if (filters.keyword.trim()) params.keyword = filters.keyword.trim()
+  const { data } = await apiClient.get<Blob>(`${basePath}/user-activity/export`, { params, responseType: 'blob' })
+  return data
+}
+
 export async function deleteEvent(id: number): Promise<PromptDeleteResult> {
   const { data } = await apiClient.delete<PromptDeleteResult>(`${basePath}/events/${id}`)
   return data
@@ -110,6 +139,8 @@ export const promptAuditAPI = {
   getRuntime,
   listEvents,
   getEvent,
+  listUserActivity,
+  exportUserPrompts,
   deleteEvent,
   batchDeleteEvents,
   previewDelete,

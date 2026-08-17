@@ -8,6 +8,7 @@ import PromptAuditView from '../PromptAuditView.vue'
 const mocks = vi.hoisted(() => ({
   getConfig: vi.fn(), updateConfig: vi.fn(), probeEndpoint: vi.fn(), getRuntime: vi.fn(), listEvents: vi.fn(),
   getEvent: vi.fn(), deleteEvent: vi.fn(), batchDeleteEvents: vi.fn(), previewDelete: vi.fn(), deleteEventsByFilter: vi.fn(), listGroups: vi.fn(),
+  listUserActivity: vi.fn(), exportUserPrompts: vi.fn(),
   showSuccess: vi.fn(), showError: vi.fn(),
 }))
 
@@ -19,7 +20,7 @@ vi.mock('vue-i18n', async () => {
 })
 
 const baseConfig = (): PromptAuditConfig => ({
-  enabled: true, blocking_enabled: false, blocking_latest_turn_only: false, store_pass_events: false, effective_mode: 'async_audit', strategy: 'priority',
+  enabled: true, activity_recording_enabled: false, blocking_enabled: false, blocking_latest_turn_only: false, store_pass_events: false, effective_mode: 'async_audit', strategy: 'priority',
   worker_count: 4, queue_capacity: 100, scanners: SCANNER_CATALOG.map((item) => item.id), all_groups: true, group_ids: [],
   endpoints: [{ id: 'guard-1', name: 'Guard One', protocol: 'openai_compatible', base_url: 'http://127.0.0.1:8000', model: 'guard-model', timeout_ms: 3000, input_limit: 4000, enabled: true, has_token: true, token_status: 'configured' }],
   config_version: 7, updated_at: '2026-07-16T00:00:00Z', updated_by: 1, change_summary: '{}',
@@ -44,6 +45,11 @@ const EventsStub = defineComponent({
   emits: ['filters-change', 'search', 'selection', 'page', 'page-size', 'view', 'delete', 'batch-delete', 'preview-delete'],
   template: '<div data-test="events"><button data-test="preview" @click="$emit(\'preview-delete\')">preview</button><button data-test="change-filter" @click="$emit(\'filters-change\', { ...filters, keyword: \'changed\' })">change</button><button data-test="delete-one" @click="$emit(\'delete\', 5)">delete</button><button data-test="select-batch" @click="$emit(\'selection\', [5, 6])">select</button><button data-test="delete-batch" @click="$emit(\'batch-delete\')">batch</button></div>',
 })
+const ActivityStub = defineComponent({
+  props: ['items', 'filters', 'loading', 'error', 'totalUsers', 'totalPrompts', 'activeDays', 'page', 'pageSize', 'pages'],
+  emits: ['search', 'refresh', 'export', 'page', 'page-size', 'view-user'],
+  template: '<div data-test="activity"><button data-test="view-user" @click="$emit(\'view-user\', 42)">view</button></div>',
+})
 const DetailStub = defineComponent({ props: ['show', 'event', 'loading'], emits: ['close'], template: '<div data-test="detail" />' })
 const ConfirmStub = defineComponent({ props: ['show', 'title', 'message'], emits: ['confirm', 'cancel'], template: '<div v-if="show" data-test="confirm"><button data-test="confirm-action" @click="$emit(\'confirm\')">confirm</button></div>' })
 const FilterDeleteStub = defineComponent({
@@ -54,7 +60,7 @@ const FilterDeleteStub = defineComponent({
 
 function mountView() {
   return mount(PromptAuditView, {
-    global: { stubs: { AppLayout: AppLayoutStub, RuntimeOverview: RuntimeStub, EndpointPool: EndpointStub, PolicyPanel: PolicyStub, EventWorkspace: EventsStub, EventDetailDialog: DetailStub, FilterDeleteDialog: FilterDeleteStub, ConfirmDialog: ConfirmStub } },
+    global: { stubs: { AppLayout: AppLayoutStub, RuntimeOverview: RuntimeStub, EndpointPool: EndpointStub, PolicyPanel: PolicyStub, EventWorkspace: EventsStub, UserActivityWorkspace: ActivityStub, EventDetailDialog: DetailStub, FilterDeleteDialog: FilterDeleteStub, ConfirmDialog: ConfirmStub } },
   })
 }
 
@@ -65,6 +71,8 @@ describe('PromptAuditView', () => {
     mocks.getRuntime.mockResolvedValue(runtime())
     mocks.listGroups.mockResolvedValue([])
     mocks.listEvents.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 0 })
+    mocks.listUserActivity.mockResolvedValue({ items: [], total_users: 0, total_prompts: 0, active_days: 0, page: 1, page_size: 20, pages: 0 })
+    mocks.exportUserPrompts.mockResolvedValue(new Blob(['csv']))
     mocks.updateConfig.mockImplementation(async () => ({ ...baseConfig(), config_version: 8 }))
     mocks.probeEndpoint.mockResolvedValue({ ok: true, status: 'healthy', message: 'ok', latency_ms: 2, http_status: 200, retryable: false, checked_at: '2026-07-16T00:00:00Z', token_applied: true })
     mocks.previewDelete.mockResolvedValue({ matched_count: 2, filter_summary: {}, snapshot_max_id: 10, filter_hash: 'a'.repeat(64), confirmation_token: 'opaque-confirmation', expires_at: '2026-07-16T00:05:00Z' })
@@ -80,6 +88,7 @@ describe('PromptAuditView', () => {
     expect(mocks.getRuntime).toHaveBeenCalledOnce()
     expect(mocks.listGroups).toHaveBeenCalledOnce()
     expect(mocks.listEvents).toHaveBeenCalledOnce()
+    expect(mocks.listUserActivity).toHaveBeenCalledOnce()
     await flushPromises()
     expect(wrapper.get('[data-test="runtime"]').text()).toContain('runtime offline')
     expect(wrapper.find('[data-test="endpoint"]').exists()).toBe(true)
@@ -99,6 +108,7 @@ describe('PromptAuditView', () => {
     expect(wrapper.find('[data-test="pass-events-disabled-notice"]').exists()).toBe(true)
     expect(wrapper.get('[data-test="tab-events"]').text()).toContain('admin.promptAudit.tabs.events')
     expect(wrapper.get('[data-test="tab-config"]').text()).toContain('admin.promptAudit.tabs.config')
+    expect(wrapper.get('[data-test="tab-activity"]').text()).toContain('admin.promptAudit.tabs.activity')
 
     await wrapper.get('[data-test="tab-config"]').trigger('click')
     await flushPromises()
@@ -178,7 +188,7 @@ describe('PromptAuditView', () => {
     await flushPromises()
     await wrapper.get('[data-test="tab-config"]').trigger('click')
     const switches = wrapper.findAll('[role="switch"]')
-    expect(switches).toHaveLength(4)
+    expect(switches).toHaveLength(5)
     expect(switches.every((item) => Boolean(item.attributes('aria-label')))).toBe(true)
     expect(wrapper.html()).toContain('fixed inset-x-0 bottom-0')
     expect(wrapper.html()).toContain('flex-wrap')

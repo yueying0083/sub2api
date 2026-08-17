@@ -178,6 +178,11 @@ func (r *fakeJobRepository) RecordBlocking(_ context.Context, snapshot PromptSna
 	r.recordBlockingSnapshot, r.recordBlockingResult = snapshot, result
 	return nil, r.recordBlockingErr
 }
+func (r *fakeJobRepository) RecordInput(_ context.Context, snapshot PromptSnapshot, _ int64) (*Event, error) {
+	r.recordBlockingSnapshot = snapshot
+	r.eventCount++
+	return &Event{ID: int64(r.eventCount), Snapshot: snapshot, Decision: EventPass}, nil
+}
 
 type fakePayloadStore struct {
 	mu sync.Mutex
@@ -244,6 +249,41 @@ func asyncRequest() Request {
 }
 
 func TestEnqueuerStagingPayloadPublishProtocolAndFailureCleanup(t *testing.T) {
+	t.Run("record-only persists latest user input without guard queue", func(t *testing.T) {
+		cfg := asyncConfig()
+		cfg.RiskControlEnabled = false
+		cfg.Enabled = false
+		cfg.ActivityRecordingEnabled = true
+		cfg.Endpoints = nil
+		repo := &fakeJobRepository{}
+		payload := &fakePayloadStore{values: map[int64]string{}}
+		require.NoError(t, NewEnqueuer(&fakeConfigStore{cfg: cfg, active: true}, repo, payload).Enqueue(context.Background(), Request{
+			Protocol: "openai_chat_completions",
+			Body:     []byte(`{"messages":[{"role":"system","content":"do not retain"},{"role":"user","content":"old context"},{"role":"user","content":"current input"}]}`),
+		}))
+		require.Equal(t, 1, repo.eventCount)
+		require.Equal(t, "current input", repo.recordBlockingSnapshot.FullPrompt)
+		require.Equal(t, len([]rune("current input")), repo.recordBlockingSnapshot.PromptLength)
+		require.Equal(t, 1, repo.recordBlockingSnapshot.MessageCount)
+		require.Empty(t, payload.values)
+	})
+
+	t.Run("record-only drops invalid payload without creating a record", func(t *testing.T) {
+		cfg := asyncConfig()
+		cfg.RiskControlEnabled = false
+		cfg.Enabled = false
+		cfg.ActivityRecordingEnabled = true
+		cfg.Endpoints = nil
+		repo := &fakeJobRepository{}
+		payload := &fakePayloadStore{values: map[int64]string{}}
+		require.NoError(t, NewEnqueuer(&fakeConfigStore{cfg: cfg, active: true}, repo, payload).Enqueue(context.Background(), Request{
+			Protocol: "openai_chat_completions",
+			Body:     []byte(`{"messages":`),
+		}))
+		require.Zero(t, repo.eventCount)
+		require.Empty(t, payload.values)
+	})
+
 	t.Run("success", func(t *testing.T) {
 		trace := []string{}
 		repo := &fakeJobRepository{trace: &trace, createJob: &Job{ID: 41}}

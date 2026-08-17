@@ -386,6 +386,12 @@ func (s *PromptService) probeSnapshot() map[string]ProbeResult {
 func (s *PromptService) ListEvents(ctx context.Context, filter EventFilter, page, pageSize int) (*EventPage, error) {
 	return s.repo.ListEvents(ctx, filter, page, pageSize)
 }
+func (s *PromptService) ListUserActivity(ctx context.Context, filter UserActivityFilter, page, pageSize int) (*UserActivityPage, error) {
+	return s.repo.ListUserActivity(ctx, filter, page, pageSize)
+}
+func (s *PromptService) ExportUserPrompts(ctx context.Context, filter UserActivityFilter, limit int) ([]*UserPromptRecord, error) {
+	return s.repo.ExportUserPrompts(ctx, filter, limit)
+}
 func (s *PromptService) GetEvent(ctx context.Context, id int64) (*Event, error) {
 	return s.repo.GetEvent(ctx, id)
 }

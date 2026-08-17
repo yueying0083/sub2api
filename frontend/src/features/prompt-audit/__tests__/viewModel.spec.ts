@@ -12,6 +12,7 @@ import {
 
 const config = (): PromptAuditConfig => ({
   enabled: true,
+  activity_recording_enabled: false,
   blocking_enabled: false,
   blocking_latest_turn_only: false,
   store_pass_events: false,

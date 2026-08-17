@@ -3,6 +3,7 @@ package securityaudit
 import (
 	"context"
 	"errors"
+	"unicode/utf8"
 )
 
 type Enqueuer struct {
@@ -35,11 +36,6 @@ func (e *Enqueuer) Enqueue(ctx context.Context, req Request) error {
 		LogInfo(EventEnqueueSkipped, mergeLogFields(baseFields, map[string]any{"status": "skipped", "error_code": "group_out_of_scope"}))
 		return nil
 	}
-	if len(cfg.EnabledEndpoints()) == 0 {
-		e.recordDropped()
-		LogWarn(EventEnqueueDropped, mergeLogFields(baseFields, map[string]any{"status": "dropped", "error_code": "no_enabled_endpoint"}))
-		return nil
-	}
 	snapshot, err := ExtractPromptSnapshot(req)
 	if errors.Is(err, ErrNoPromptText) {
 		LogInfo(EventEnqueueSkipped, mergeLogFields(baseFields, map[string]any{"status": "skipped", "error_code": "no_user_text"}))
@@ -48,6 +44,27 @@ func (e *Enqueuer) Enqueue(ctx context.Context, req Request) error {
 	if err != nil {
 		e.recordDropped()
 		LogWarn(EventEnqueueDropped, mergeLogFields(baseFields, map[string]any{"status": "dropped", "error_code": "snapshot_invalid"}))
+		return nil
+	}
+	auditAsync := cfg.RiskControlEnabled && cfg.Enabled && !cfg.BlockingEnabled && len(cfg.EnabledEndpoints()) > 0
+	if cfg.ActivityRecordingEnabled && !auditAsync {
+		// Record-only mode persists metadata for the stored latest user input,
+		// never metadata derived from system prompts or carried context.
+		snapshot.PromptLength = utf8.RuneCountInString(snapshot.FullPrompt)
+		snapshot.MessageCount = 1
+		if _, err := e.repo.RecordInput(ctx, snapshot, cfg.ConfigVersion); err != nil {
+			e.recordDropped()
+			LogWarn(EventEnqueueDropped, mergeLogFields(baseFields, map[string]any{"status": "dropped", "error_code": "activity_record_failed"}))
+			return err
+		}
+		if e.metrics != nil {
+			e.metrics.IncEnqueued()
+		}
+		return nil
+	}
+	if len(cfg.EnabledEndpoints()) == 0 {
+		e.recordDropped()
+		LogWarn(EventEnqueueDropped, mergeLogFields(baseFields, map[string]any{"status": "dropped", "error_code": "no_enabled_endpoint"}))
 		return nil
 	}
 	job, err := e.repo.CreateStagingWithCapacity(ctx, snapshot.Redacted(), cfg.ConfigVersion, 3, cfg.QueueCapacity)

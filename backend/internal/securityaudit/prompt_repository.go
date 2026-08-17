@@ -75,6 +75,7 @@ type JobRepository interface {
 	ReclaimStale(ctx context.Context, stagingBefore, processingBefore time.Time, limit int) (int64, error)
 	QueueStats(ctx context.Context) (QueueStats, error)
 	RecordBlocking(ctx context.Context, snapshot PromptSnapshot, configVersion int64, result *NormalizedResult, storePassEvents bool) (*Event, error)
+	RecordInput(ctx context.Context, snapshot PromptSnapshot, configVersion int64) (*Event, error)
 }
 
 type PostgreSQLRepository struct {
@@ -297,6 +298,35 @@ func (r *PostgreSQLRepository) RecordBlocking(ctx context.Context, snapshot Prom
 		if err != nil {
 			return nil, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return event, nil
+}
+
+// RecordInput persists an administrator-requested activity record without
+// invoking a Guard model. It is used only by asynchronous record-only mode;
+// failures are best-effort and never alter the user response.
+func (r *PostgreSQLRepository) RecordInput(ctx context.Context, snapshot PromptSnapshot, configVersion int64) (*Event, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	job, err := insertJob(ctx, tx, snapshot.Redacted(), ModeAsync, configVersion, "done", 1)
+	if err != nil {
+		return nil, err
+	}
+	result := &NormalizedResult{
+		Decision: EventPass, RiskLevel: RiskLow, Action: ActionAllow,
+		Categories: []string{}, MatchedScanners: []string{}, ScannerScores: map[string]float64{},
+		ScannerEvidence: map[string]string{}, ScannerBackend: "record-only", ScannerVersion: "1",
+		PolicyID: "activity-recording", PolicyVersion: 1,
+	}
+	event, err := insertEvent(ctx, tx, job.ID, snapshot.Redacted(), configVersion, result)
+	if err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err

@@ -51,6 +51,12 @@ func (s *fakePromptAdminService) ListEvents(ctx context.Context, filter EventFil
 	}
 	return s.list(ctx, filter, page, pageSize)
 }
+func (s *fakePromptAdminService) ListUserActivity(context.Context, UserActivityFilter, int, int) (*UserActivityPage, error) {
+	return &UserActivityPage{Items: []*UserActivity{}, Page: 1, PageSize: 20}, nil
+}
+func (s *fakePromptAdminService) ExportUserPrompts(context.Context, UserActivityFilter, int) ([]*UserPromptRecord, error) {
+	return nil, nil
+}
 func (s *fakePromptAdminService) GetEvent(ctx context.Context, id int64) (*Event, error) {
 	if s.get == nil {
 		return nil, ErrEventNotFound

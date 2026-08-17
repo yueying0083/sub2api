@@ -64,6 +64,22 @@ func TestSnapshotFullPromptKeepsUnredactedText(t *testing.T) {
 	require.Equal(t, snapshot.FullPrompt, snapshot.Redacted().FullPrompt)
 }
 
+func TestSnapshotPersistsOnlyLatestUserInput(t *testing.T) {
+	body := `{"messages":[
+		{"role":"system","content":"SYSTEM_CONTEXT_MUST_NOT_PERSIST"},
+		{"role":"user","content":"HISTORICAL_USER_CONTEXT_MUST_NOT_PERSIST"},
+		{"role":"assistant","content":"ASSISTANT_CONTEXT_MUST_NOT_PERSIST"},
+		{"role":"user","content":"CURRENT_USER_INPUT_TO_STORE"}
+	]}`
+	snapshot, err := ExtractPromptSnapshot(Request{Protocol: "openai_chat_completions", Body: []byte(body)})
+	require.NoError(t, err)
+	require.Equal(t, "CURRENT_USER_INPUT_TO_STORE", snapshot.FullPrompt)
+	require.Contains(t, snapshot.ScanText, "SYSTEM_CONTEXT_MUST_NOT_PERSIST")
+	require.NotContains(t, snapshot.FullPrompt, "SYSTEM_CONTEXT_MUST_NOT_PERSIST")
+	require.NotContains(t, snapshot.FullPrompt, "HISTORICAL_USER_CONTEXT_MUST_NOT_PERSIST")
+	require.NotContains(t, snapshot.FullPrompt, "ASSISTANT_CONTEXT_MUST_NOT_PERSIST")
+}
+
 func TestBuildFullPromptStripsNULAndTruncates(t *testing.T) {
 	require.Equal(t, "abcd", BuildFullPrompt("ab\x00cd", 0))
 	long := strings.Repeat("长", DefaultFullPromptMaxRunes+10)
@@ -72,14 +88,14 @@ func TestBuildFullPromptStripsNULAndTruncates(t *testing.T) {
 	require.True(t, strings.HasSuffix(trimmed, "…"))
 }
 
-func TestFullPromptFromScanTextRestoresMultiSegmentLayout(t *testing.T) {
-	scanText, metadataText := buildPrioritizedScanText([]string{"latest user", "system policy", "earlier user"})
+func TestFullPromptFromScanTextRetainsOnlyLatestUserInput(t *testing.T) {
+	scanText, _ := buildPrioritizedScanText([]string{"latest user", "system policy", "earlier user"})
 	require.Contains(t, scanText, promptAuditPrioritySeparator)
-	require.Equal(t, metadataText, FullPromptFromScanText(scanText))
+	require.Equal(t, "latest user", FullPromptFromScanText(scanText))
 
-	singleScan, singleMeta := buildPrioritizedScanText([]string{"only"})
+	singleScan, _ := buildPrioritizedScanText([]string{"only"})
 	require.NotContains(t, singleScan, promptAuditPrioritySeparator)
-	require.Equal(t, singleMeta, FullPromptFromScanText(singleScan))
+	require.Equal(t, "only", FullPromptFromScanText(singleScan))
 }
 
 func TestSplitRunesDoesNotSplitUTF8(t *testing.T) {
@@ -142,7 +158,9 @@ func TestPromptSnapshotSeparatesAnthropicUserPromptFromHarnessBlocks(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, 4, snapshot.MessageCount)
 	require.True(t, strings.HasPrefix(snapshot.ScanText, latest+promptAuditPrioritySeparator))
-	require.True(t, strings.HasPrefix(snapshot.RedactedPreview, "请帮我编写一篇黄色小说"))
+	require.Equal(t, latest, snapshot.FullPrompt)
+	require.NotContains(t, snapshot.FullPrompt, "# AGENTS.md instructions")
+	require.NotContains(t, snapshot.FullPrompt, "<environment_context>")
 
 	chunks := SplitRunes(snapshot.ScanText, 128)
 	require.Equal(t, latest, chunks[0])
@@ -358,7 +376,9 @@ func TestResponsesOutputTextIncludedInFullAndLatestTurnSnapshots(t *testing.T) {
 	full, err := ExtractPromptSnapshot(req)
 	require.NoError(t, err)
 	require.Contains(t, full.ScanText, "captured previous assistant output")
-	require.Contains(t, full.FullPrompt, "captured previous assistant output")
+	require.Equal(t, "captured latest user input", full.FullPrompt)
+	require.NotContains(t, full.FullPrompt, "captured previous assistant output")
+	require.NotContains(t, full.FullPrompt, "earlier user input")
 	require.Equal(t, 3, full.MessageCount)
 
 	latestTurn, err := ExtractBlockingPromptSnapshot(req, true)

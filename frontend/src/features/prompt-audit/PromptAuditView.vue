@@ -86,6 +86,35 @@
               @preview-delete="requestFilterDeletePreview"
             />
           </div>
+
+          <div v-show="activeTab === 'activity'" data-test="tab-panel-activity">
+            <div
+              v-if="draft?.enabled && !draft.store_pass_events"
+              role="status"
+              class="mt-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-200"
+            >
+              <span>{{ t('admin.promptAudit.activity.incompleteNotice') }}</span>
+              <button type="button" class="btn btn-secondary btn-sm" @click="activeTab = 'config'">{{ t('admin.promptAudit.events.openConfiguration') }}</button>
+            </div>
+            <UserActivityWorkspace
+              :items="userActivity.items"
+              :total-users="userActivity.total_users"
+              :total-prompts="userActivity.total_prompts"
+              :active-days="userActivity.active_days"
+              :page="userActivity.page"
+              :page-size="userActivity.page_size"
+              :pages="userActivity.pages"
+              :filters="activityFilters"
+              :loading="loading.activity"
+              :error="loadErrors.activity"
+              @search="applyActivityFilters"
+              @refresh="loadUserActivity"
+              @export="exportActivityCsv"
+              @page="changeActivityPage"
+              @page-size="changeActivityPageSize"
+              @view-user="viewUserRecords"
+            />
+          </div>
         </main>
       </template>
     </div>
@@ -94,6 +123,7 @@
       <div class="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-3">
         <div class="flex flex-wrap items-center gap-x-5 gap-y-2">
           <SaveToggle :label="t('admin.promptAudit.saveBar.enabled')" :model-value="draft.enabled" data-test="enabled-toggle" @update:model-value="setEnabled" />
+          <SaveToggle :label="t('admin.promptAudit.saveBar.activityRecording')" :model-value="draft.activity_recording_enabled" data-test="activity-recording-toggle" @update:model-value="replaceDraft({ ...draft!, activity_recording_enabled: $event })" />
           <SaveToggle :label="t('admin.promptAudit.saveBar.blocking')" :model-value="draft.blocking_enabled" :disabled="!draft.enabled" data-test="blocking-toggle" @update:model-value="setBlocking" />
           <SaveToggle :label="t('admin.promptAudit.saveBar.blockingLatestTurnOnly')" :model-value="draft.blocking_latest_turn_only" :disabled="!draft.enabled || !draft.blocking_enabled" data-test="blocking-latest-turn-only-toggle" @update:model-value="replaceDraft({ ...draft!, blocking_latest_turn_only: $event })" />
           <SaveToggle :label="t('admin.promptAudit.saveBar.storePass')" :model-value="draft.store_pass_events" data-test="store-pass-toggle" @update:model-value="replaceDraft({ ...draft!, store_pass_events: $event })" />
@@ -146,6 +176,7 @@
 <script setup lang="ts">
 import { computed, defineComponent, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { saveAs } from 'file-saver'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import { useAppStore } from '@/stores/app'
@@ -154,6 +185,7 @@ import RuntimeOverview from './components/RuntimeOverview.vue'
 import EndpointPool from './components/EndpointPool.vue'
 import PolicyPanel from './components/PolicyPanel.vue'
 import EventWorkspace from './components/EventWorkspace.vue'
+import UserActivityWorkspace from './components/UserActivityWorkspace.vue'
 import EventDetailDialog from './components/EventDetailDialog.vue'
 import FilterDeleteDialog from './components/FilterDeleteDialog.vue'
 import promptAuditAPI from './api'
@@ -166,6 +198,8 @@ import type {
   PromptDeletePreview,
   PromptEventFilters,
   PromptEventPage,
+  PromptUserActivityFilters,
+  PromptUserActivityPage,
   PromptLoadErrors,
   PromptProbeResult,
 } from './types'
@@ -173,10 +207,11 @@ import { buildUpdateRequest, cloneData, configToDraft, draftFingerprint, emptyEv
 
 const { t, locale } = useI18n()
 const appStore = useAppStore()
-type PromptAuditPageTab = 'config' | 'events'
+type PromptAuditPageTab = 'config' | 'events' | 'activity'
 const activeTab = ref<PromptAuditPageTab>('events')
 const pageTabs = computed(() => [
   { id: 'events' as const, label: t('admin.promptAudit.tabs.events') },
+  { id: 'activity' as const, label: t('admin.promptAudit.tabs.activity') },
   { id: 'config' as const, label: t('admin.promptAudit.tabs.config') },
 ])
 const serverConfig = ref<PromptAuditDraft | null>(null)
@@ -184,6 +219,8 @@ const draft = ref<PromptAuditDraft | null>(null)
 const runtime = ref<PromptAuditRuntime | null>(null)
 const groups = ref<PromptAuditGroup[]>([])
 const events = reactive<PromptEventPage>({ items: [], total: 0, page: 1, page_size: 20, pages: 0 })
+const userActivity = reactive<PromptUserActivityPage>({ items: [], total_users: 0, total_prompts: 0, active_days: 0, page: 1, page_size: 20, pages: 0 })
+const activityFilters = ref<PromptUserActivityFilters>(defaultActivityFilters())
 const filters = ref<PromptEventFilters>(emptyEventFilters())
 const appliedFilters = ref<PromptEventFilters>(emptyEventFilters())
 const selectedEventIds = ref<number[]>([])
@@ -196,8 +233,8 @@ const deletePreview = ref<PromptDeletePreview | null>(null)
 const deletePreviewFilters = ref<PromptEventFilters | null>(null)
 const showBlockingConfirmation = ref(false)
 const deleteRequest = reactive<{ mode: '' | 'single' | 'batch'; ids: number[] }>({ mode: '', ids: [] })
-const loading = reactive({ config: false, runtime: false, groups: false, events: false, saving: false, detail: false, deleting: false, previewing: false })
-const loadErrors = reactive<PromptLoadErrors>({ config: '', runtime: '', groups: '', events: '' })
+const loading = reactive({ config: false, runtime: false, groups: false, events: false, activity: false, exporting: false, saving: false, detail: false, deleting: false, previewing: false })
+const loadErrors = reactive<PromptLoadErrors>({ config: '', runtime: '', groups: '', events: '', activity: '' })
 const dirty = computed(() => draftFingerprint(draft.value) !== draftFingerprint(serverConfig.value))
 
 const SaveToggle = defineComponent({
@@ -285,8 +322,20 @@ async function loadEvents() {
     loading.events = false
   }
 }
+async function loadUserActivity() {
+  loading.activity = true
+  loadErrors.activity = ''
+  try {
+    const result = await promptAuditAPI.listUserActivity(activityFilters.value, userActivity.page, userActivity.page_size)
+    Object.assign(userActivity, result)
+  } catch (error) {
+    loadErrors.activity = errorMessage(error, 'admin.promptAudit.errors.loadActivity')
+  } finally {
+    loading.activity = false
+  }
+}
 async function loadInitial() {
-  await Promise.allSettled([loadConfig(), loadRuntime(), loadGroups(), loadEvents()])
+  await Promise.allSettled([loadConfig(), loadRuntime(), loadGroups(), loadEvents(), loadUserActivity()])
 }
 
 function replaceDraft(value: PromptAuditDraft) { draft.value = cloneData(value) }
@@ -354,6 +403,35 @@ function applyEventFilters(value: PromptEventFilters) {
 }
 function changePage(value: number) { events.page = value; void loadEvents() }
 function changePageSize(value: number) { events.page_size = value; events.page = 1; void loadEvents() }
+function applyActivityFilters(value: PromptUserActivityFilters) {
+  activityFilters.value = cloneData(value)
+  userActivity.page = 1
+  void loadUserActivity()
+}
+function changeActivityPage(value: number) { userActivity.page = value; void loadUserActivity() }
+function changeActivityPageSize(value: number) { userActivity.page_size = value; userActivity.page = 1; void loadUserActivity() }
+async function exportActivityCsv() {
+  if (loading.exporting) return
+  loading.exporting = true
+  try {
+    const blob = await promptAuditAPI.exportUserPrompts(activityFilters.value)
+    const start = activityFilters.value.start_at.slice(0, 10)
+    const end = activityFilters.value.end_at.slice(0, 10)
+    saveAs(blob, `prompt-user-records-${start}-${end}.csv`)
+  } catch (error) {
+    appStore.showError(errorMessage(error, 'admin.promptAudit.errors.exportActivity'))
+  } finally {
+    loading.exporting = false
+  }
+}
+function viewUserRecords(userID: number) {
+  const value = { ...emptyEventFilters(), user_id: String(userID), start_at: activityFilters.value.start_at, end_at: activityFilters.value.end_at }
+  filters.value = cloneData(value)
+  appliedFilters.value = cloneData(value)
+  events.page = 1
+  activeTab.value = 'events'
+  void loadEvents()
+}
 async function openEvent(id: number) {
   showEventDetail.value = true
   loading.detail = true
@@ -426,6 +504,16 @@ async function confirmFilterDelete(filters?: PromptEventFilters) {
 }
 function formatDate(value: string): string {
   return new Intl.DateTimeFormat(locale.value, { dateStyle: 'medium', timeStyle: 'medium' }).format(new Date(value))
+}
+
+function localDateTimeInput(value: Date): string {
+  const pad = (part: number) => String(part).padStart(2, '0')
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}`
+}
+function defaultActivityFilters(): PromptUserActivityFilters {
+  const end = new Date()
+  const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000)
+  return { keyword: '', start_at: localDateTimeInput(start), end_at: localDateTimeInput(end) }
 }
 
 onMounted(loadInitial)

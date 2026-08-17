@@ -36,6 +36,50 @@ type EventPage struct {
 	Pages    int      `json:"pages"`
 }
 
+// UserActivityFilter scopes the administrator-only team activity summary.
+// It intentionally reads from persisted prompt audit events so the summary and
+// the underlying event drill-down always describe the same retained dataset.
+type UserActivityFilter struct {
+	Keyword string     `json:"keyword,omitempty"`
+	StartAt *time.Time `json:"start_at,omitempty"`
+	EndAt   *time.Time `json:"end_at,omitempty"`
+}
+
+type UserActivity struct {
+	UserID            int64     `json:"user_id"`
+	Username          string    `json:"username"`
+	UserEmail         string    `json:"user_email"`
+	PromptCount       int64     `json:"prompt_count"`
+	ActiveDays        int64     `json:"active_days"`
+	FirstActiveAt     time.Time `json:"first_active_at"`
+	LastActiveAt      time.Time `json:"last_active_at"`
+	LastPromptPreview string    `json:"last_prompt_preview"`
+	Models            []string  `json:"models"`
+	Groups            []string  `json:"groups"`
+}
+
+type UserActivityPage struct {
+	Items        []*UserActivity `json:"items"`
+	TotalUsers   int64           `json:"total_users"`
+	TotalPrompts int64           `json:"total_prompts"`
+	ActiveDays   int64           `json:"active_days"`
+	Page         int             `json:"page"`
+	PageSize     int             `json:"page_size"`
+	Pages        int             `json:"pages"`
+}
+
+type UserPromptRecord struct {
+	CreatedAt  time.Time `json:"created_at"`
+	UserID     int64     `json:"user_id"`
+	Username   string    `json:"username"`
+	UserEmail  string    `json:"user_email"`
+	APIKeyName string    `json:"api_key_name"`
+	GroupName  string    `json:"group_name"`
+	Model      string    `json:"model"`
+	Prompt     string    `json:"prompt"`
+	RequestID  string    `json:"request_id"`
+}
+
 type DeletePreview struct {
 	MatchedCount      int64       `json:"matched_count"`
 	FilterSummary     EventFilter `json:"filter_summary"`
@@ -58,6 +102,112 @@ type EventRepository interface {
 	DeleteEventsByIDs(ctx context.Context, ids []int64) (*DeleteResult, error)
 	PreviewDelete(ctx context.Context, filter EventFilter) (*DeletePreview, error)
 	DeleteEventsByFilter(ctx context.Context, filter EventFilter, snapshotMaxID int64, batchSize int) (*DeleteResult, error)
+	ListUserActivity(ctx context.Context, filter UserActivityFilter, page, pageSize int) (*UserActivityPage, error)
+	ExportUserPrompts(ctx context.Context, filter UserActivityFilter, limit int) ([]*UserPromptRecord, error)
+}
+
+func (r *PostgreSQLRepository) ListUserActivity(ctx context.Context, filter UserActivityFilter, page, pageSize int) (*UserActivityPage, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	where, args := buildUserActivityWhere(filter, 1)
+	result := &UserActivityPage{Items: make([]*UserActivity, 0, pageSize), Page: page, PageSize: pageSize}
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT e.user_id), COUNT(*),
+		COUNT(DISTINCT (e.created_at AT TIME ZONE 'UTC')::date)
+		FROM prompt_audit_events e`+where, args...).Scan(&result.TotalUsers, &result.TotalPrompts, &result.ActiveDays); err != nil {
+		return nil, err
+	}
+	if result.TotalUsers > 0 {
+		result.Pages = int((result.TotalUsers + int64(pageSize) - 1) / int64(pageSize))
+	}
+	queryArgs := append([]any(nil), args...)
+	limitIndex := len(queryArgs) + 1
+	queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
+	rows, err := r.db.QueryContext(ctx, `WITH filtered AS (
+		SELECT e.* FROM prompt_audit_events e`+where+`
+	), summaries AS (
+		SELECT user_id, COUNT(*) AS prompt_count,
+			COUNT(DISTINCT (created_at AT TIME ZONE 'UTC')::date) AS active_days,
+			MIN(created_at) AS first_active_at, MAX(created_at) AS last_active_at,
+			ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(model, '')), NULL) AS models,
+			ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(group_name, '')), NULL) AS groups
+		FROM filtered GROUP BY user_id
+	), latest AS (
+		SELECT DISTINCT ON (user_id) user_id, username_snapshot, user_email_snapshot, redacted_preview
+		FROM filtered ORDER BY user_id, created_at DESC, id DESC
+	)
+	SELECT s.user_id, l.username_snapshot, l.user_email_snapshot, s.prompt_count, s.active_days,
+		s.first_active_at, s.last_active_at, l.redacted_preview, s.models, s.groups
+	FROM summaries s JOIN latest l USING (user_id)
+	ORDER BY s.last_active_at DESC, s.user_id ASC
+	LIMIT $`+fmt.Sprint(limitIndex)+` OFFSET $`+fmt.Sprint(limitIndex+1), queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		item := &UserActivity{}
+		if err := rows.Scan(&item.UserID, &item.Username, &item.UserEmail, &item.PromptCount, &item.ActiveDays,
+			&item.FirstActiveAt, &item.LastActiveAt, &item.LastPromptPreview, pq.Array(&item.Models), pq.Array(&item.Groups)); err != nil {
+			return nil, err
+		}
+		result.Items = append(result.Items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (r *PostgreSQLRepository) ExportUserPrompts(ctx context.Context, filter UserActivityFilter, limit int) ([]*UserPromptRecord, error) {
+	if limit < 1 || limit > 100000 {
+		limit = 100000
+	}
+	where, args := buildUserActivityWhere(filter, 1)
+	args = append(args, limit)
+	rows, err := r.db.QueryContext(ctx, `SELECT e.created_at, e.user_id, e.username_snapshot,
+		e.user_email_snapshot, e.api_key_name_snapshot, e.group_name, e.model, e.full_prompt, e.request_id
+		FROM prompt_audit_events e`+where+fmt.Sprintf(` ORDER BY e.created_at ASC, e.id ASC LIMIT $%d`, len(args)), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	items := make([]*UserPromptRecord, 0)
+	for rows.Next() {
+		item := &UserPromptRecord{}
+		if err := rows.Scan(&item.CreatedAt, &item.UserID, &item.Username, &item.UserEmail, &item.APIKeyName,
+			&item.GroupName, &item.Model, &item.Prompt, &item.RequestID); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func buildUserActivityWhere(filter UserActivityFilter, firstIndex int) (string, []any) {
+	clauses := []string{" WHERE e.user_id IS NOT NULL"}
+	args := make([]any, 0, 3)
+	add := func(clause string, value any) {
+		clauses = append(clauses, fmt.Sprintf(clause, firstIndex+len(args)))
+		args = append(args, value)
+	}
+	if keyword := strings.TrimSpace(filter.Keyword); keyword != "" {
+		add(` AND (e.username_snapshot ILIKE $%[1]d OR e.user_email_snapshot ILIKE $%[1]d
+			OR e.redacted_preview ILIKE $%[1]d)`, "%"+TrimRunes(keyword, 128)+"%")
+	}
+	if filter.StartAt != nil {
+		add(" AND e.created_at >= $%d", filter.StartAt.UTC())
+	}
+	if filter.EndAt != nil {
+		add(" AND e.created_at <= $%d", filter.EndAt.UTC())
+	}
+	return strings.Join(clauses, ""), args
 }
 
 func (r *PostgreSQLRepository) ListEvents(ctx context.Context, filter EventFilter, page, pageSize int) (*EventPage, error) {
