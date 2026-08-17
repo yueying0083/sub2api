@@ -284,6 +284,27 @@ func TestEnqueuerStagingPayloadPublishProtocolAndFailureCleanup(t *testing.T) {
 		require.Empty(t, payload.values)
 	})
 
+	t.Run("record-only skips carried user input on continuation requests", func(t *testing.T) {
+		cfg := asyncConfig()
+		cfg.RiskControlEnabled = false
+		cfg.Enabled = false
+		cfg.ActivityRecordingEnabled = true
+		cfg.Endpoints = nil
+		for _, body := range []string{
+			`{"input":[{"role":"user","content":"deploy production"},{"role":"tool","content":"tool output"}]}`,
+			`{"input":[{"role":"user","content":"deploy production"},{"role":"user","content":"<codex_delegation><input>internal</input></codex_delegation>"}]}`,
+		} {
+			repo := &fakeJobRepository{}
+			payload := &fakePayloadStore{values: map[int64]string{}}
+			require.NoError(t, NewEnqueuer(&fakeConfigStore{cfg: cfg, active: true}, repo, payload).Enqueue(context.Background(), Request{
+				Protocol: "openai_responses",
+				Body:     []byte(body),
+			}))
+			require.Zero(t, repo.eventCount)
+			require.Empty(t, payload.values)
+		}
+	})
+
 	t.Run("success", func(t *testing.T) {
 		trace := []string{}
 		repo := &fakeJobRepository{trace: &trace, createJob: &Job{ID: 41}}

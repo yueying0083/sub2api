@@ -460,12 +460,38 @@ func normalizeSegmentsLatestUserFirst(values []promptSegment) []string {
 
 func latestUserInputText(values []promptSegment) string {
 	normalized := normalizedPromptSegments(values)
-	for index := len(normalized) - 1; index >= 0; index-- {
-		if isUserSegment(normalized[index]) {
-			return normalized[index].text
+	if len(normalized) == 0 {
+		return ""
+	}
+	// A user instruction is new only when it is the tail of this client
+	// request. Tool/assistant continuations carry older user messages again;
+	// walking backwards would record the same instruction on every model call.
+	latest := normalized[len(normalized)-1]
+	if !isUserSegment(latest) || isCodexControlEnvelope(latest.text) {
+		return ""
+	}
+	return latest.text
+}
+
+// isCodexControlEnvelope recognizes complete transport messages emitted by
+// Codex itself. Requiring the whole segment to be an envelope means a genuine
+// user message that quotes one of these markers is still retained.
+func isCodexControlEnvelope(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if strings.HasPrefix(trimmed, ">>> APPROVAL REQUEST") &&
+		strings.HasSuffix(trimmed, ">>> APPROVAL REQUEST END") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "<codex_") {
+		end := strings.IndexByte(trimmed, '>')
+		if end > len("<codex_") {
+			tag := trimmed[1:end]
+			if !strings.ContainsAny(tag, " \t\r\n/") && strings.HasSuffix(trimmed, "</"+tag+">") {
+				return true
+			}
 		}
 	}
-	return ""
+	return false
 }
 
 // blockingSegmentsLatestUserAndPreviousOutput limits synchronous guard input to

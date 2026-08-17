@@ -80,6 +80,42 @@ func TestSnapshotPersistsOnlyLatestUserInput(t *testing.T) {
 	require.NotContains(t, snapshot.FullPrompt, "ASSISTANT_CONTEXT_MUST_NOT_PERSIST")
 }
 
+func TestSnapshotDoesNotTreatCodexContinuationsAsNewUserInput(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "tool continuation",
+			body: `{"input":[{"role":"user","content":"部署生产"},{"role":"assistant","content":"working"},{"role":"tool","content":"command output"}]}`,
+		},
+		{
+			name: "delegation envelope",
+			body: `{"input":[{"role":"user","content":"部署生产"},{"role":"user","content":"<codex_delegation><source_thread_id>thread</source_thread_id><input>internal task</input></codex_delegation>"}]}`,
+		},
+		{
+			name: "approval envelope",
+			body: `{"input":[{"role":"user","content":"部署生产"},{"role":"user","content":">>> APPROVAL REQUEST BEGIN\ninternal\n>>> APPROVAL REQUEST END"}]}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot, err := ExtractPromptSnapshot(Request{Protocol: "openai_responses", Body: []byte(tt.body)})
+			require.NoError(t, err)
+			require.Empty(t, snapshot.FullPrompt)
+			require.Empty(t, snapshot.RedactedPreview)
+		})
+	}
+}
+
+func TestSnapshotKeepsUserTextThatQuotesCodexMarkers(t *testing.T) {
+	want := `这些记录包含 <codex_delegation> 和 >>> APPROVAL REQUEST END，需要修复`
+	body := `{"input":[{"role":"user","content":` + string(mustJSON(t, want)) + `}]}`
+	snapshot, err := ExtractPromptSnapshot(Request{Protocol: "openai_responses", Body: []byte(body)})
+	require.NoError(t, err)
+	require.Equal(t, want, snapshot.FullPrompt)
+}
+
 func TestBuildFullPromptStripsNULAndTruncates(t *testing.T) {
 	require.Equal(t, "abcd", BuildFullPrompt("ab\x00cd", 0))
 	long := strings.Repeat("长", DefaultFullPromptMaxRunes+10)

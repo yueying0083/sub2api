@@ -3,6 +3,7 @@ package securityaudit
 import (
 	"context"
 	"errors"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -48,6 +49,10 @@ func (e *Enqueuer) Enqueue(ctx context.Context, req Request) error {
 	}
 	auditAsync := cfg.RiskControlEnabled && cfg.Enabled && !cfg.BlockingEnabled && len(cfg.EnabledEndpoints()) > 0
 	if cfg.ActivityRecordingEnabled && !auditAsync {
+		if strings.TrimSpace(snapshot.FullPrompt) == "" {
+			LogInfo(EventEnqueueSkipped, mergeLogFields(baseFields, map[string]any{"status": "skipped", "error_code": "no_current_user_input"}))
+			return nil
+		}
 		// Record-only mode persists metadata for the stored latest user input,
 		// never metadata derived from system prompts or carried context.
 		snapshot.PromptLength = utf8.RuneCountInString(snapshot.FullPrompt)
