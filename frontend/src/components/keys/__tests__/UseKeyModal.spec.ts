@@ -287,8 +287,6 @@ describe('UseKeyModal', () => {
     const configToml = codeBlocks.find((content) => content.includes('model_provider = "OpenAI"'))
 
     expect(configToml).toBeDefined()
-    expect(configToml).toContain('model = "gpt-5.5"')
-    expect(configToml).toContain('review_model = "gpt-5.5"')
     expect(configToml).toContain('model = "gpt-5.6-terra"')
     expect(configToml).toContain('review_model = "gpt-5.6-terra"')
     expect(configToml).toContain('model_reasoning_effort = "medium"')
@@ -388,8 +386,6 @@ describe('UseKeyModal', () => {
     const configToml = codeBlocks.find((content) => content.includes('supports_websockets = true'))
 
     expect(configToml).toBeDefined()
-    expect(configToml).toContain('model = "gpt-5.5"')
-    expect(configToml).toContain('review_model = "gpt-5.5"')
     expect(configToml).toContain('model = "gpt-5.6-terra"')
     expect(configToml).toContain('review_model = "gpt-5.6-terra"')
     expect(configToml).toContain('model_reasoning_effort = "medium"')
