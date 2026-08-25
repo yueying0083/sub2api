@@ -727,7 +727,7 @@ windows_wsl_setup_acknowledged = true
 name = "OpenAI"
 base_url = "${baseUrl}"
 wire_api = "responses"
-${generateCodexProviderAuthConfig()}
+${generateCodexProviderAuthConfig(apiKey)}
 
 [features]
 image_generation = true
@@ -751,9 +751,10 @@ goals = true`
   ]
 }
 
-function generateCodexProviderAuthConfig(): string {
+function generateCodexProviderAuthConfig(apiKey: string): string {
   if (codexAuthMode.value === 'api-key') {
     return `requires_openai_auth = false
+experimental_bearer_token = "${apiKey}"
 http_headers = { "x-openai-actor-authorization" = "local-image-extension" }`
   }
 
@@ -992,7 +993,7 @@ name = "OpenAI"
 base_url = "${baseUrl}"
 wire_api = "responses"
 supports_websockets = true
-${generateCodexProviderAuthConfig()}
+${generateCodexProviderAuthConfig(apiKey)}
 
 [features]
 responses_websockets_v2 = true
